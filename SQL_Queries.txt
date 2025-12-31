@@ -1,0 +1,254 @@
+--DAU 
+SELECT toStartOfDay(toDateTime(time)) AS __timestamp,
+       count(DISTINCT user_id) AS "Unique users"
+FROM simulator_20241020.feed_actions
+GROUP BY toStartOfDay(toDateTime(time))
+ORDER BY "Unique users" DESC
+LIMIT 50000;
+
+--WAU
+SELECT toMonday(toDateTime(time)) AS __timestamp,
+       count(user_id) AS "Unique users"
+FROM simulator_20241020.feed_actions
+GROUP BY toMonday(toDateTime(time))
+ORDER BY "Unique users" DESC
+LIMIT 50000;
+
+--MAU
+SELECT toStartOfMonth(toDateTime(time)) AS __timestamp,
+       count(user_id) AS "Unique users"
+FROM simulator_20241020.feed_actions
+GROUP BY toStartOfMonth(toDateTime(time))
+ORDER BY "Unique users" DESC
+LIMIT 50000;
+
+--Stickiness
+SELECT toStartOfDay(toDateTime(date)) AS __timestamp,
+       max("Stickiness") AS "MAX(Stickiness)"
+FROM
+  (SELECT tab_1.DAU,
+          tab_2.MAU,
+          tab_1.date,
+          tab_1.month,
+          round((tab_1.DAU/tab_2.MAU),2) as Stickiness
+   FROM
+     (SELECT COUNT (DISTINCT (user_id)) as DAU,
+                   toDate(time) as date,
+                   toMonth(time) as month
+      FROM simulator_20241020.feed_actions
+      GROUP BY date,month) as tab_1
+   JOIN
+     (SELECT COUNT (DISTINCT (user_id)) as MAU,
+                   toMonth(time) as month
+      FROM simulator_20241020.feed_actions
+      GROUP BY month) as tab_2 ON tab_1.month=tab_2.month
+   GROUP BY DAU,
+            MAU,date, month
+   ORDER BY date DESC) AS virtual_table
+GROUP BY toStartOfDay(toDateTime(date))
+ORDER BY "MAX(Stickiness)" DESC
+LIMIT 1000;
+
+--Events
+SELECT toStartOfDay(toDateTime(time)) AS __timestamp,
+       action AS action,
+       count(user_id) AS "COUNT(user_id)"
+FROM simulator_20241020.feed_actions
+GROUP BY action,
+         toStartOfDay(toDateTime(time))
+ORDER BY "COUNT(user_id)" DESC
+LIMIT 50000;
+
+--CTR
+SELECT toStartOfDay(toDateTime(time)) AS __timestamp,
+       countIf(user_id, action='like')/countIf(user_id, action='view') AS "CTR"
+FROM simulator_20241020.feed_actions
+GROUP BY toStartOfDay(toDateTime(time))
+ORDER BY "CTR" DESC
+LIMIT 50000;
+
+--Top posts
+SELECT post_id AS post_id,
+       countIf(user_id, action='view') AS "Views",
+       countIf(user_id, action='like') AS "Likes",
+       countIf(user_id, action='view') / countIf(user_id, action='like') AS "CTR"
+FROM simulator_20241020.feed_actions
+GROUP BY post_id
+ORDER BY "Views" DESC
+LIMIT 50;
+
+--Top users by views
+SELECT user_id AS user_id,
+       countIf(user_id, action='view') AS "Views"
+FROM simulator_20241020.feed_actions
+GROUP BY user_id
+ORDER BY "Views" DESC
+LIMIT 50;
+
+
+--Audience by week--
+
+SELECT toStartOfDay(toDateTime(this_week)) AS __timestamp,
+       status AS status,
+       sum(num_users) AS "SUM(num_users)"
+FROM
+  (SELECT this_week,
+          previous_week, -uniq(user_id) as num_users,
+                          status
+   FROM
+     (SELECT user_id,
+             groupUniqArray(toMonday(toDate(time))) as weeks_visited,
+             addWeeks(arrayJoin(weeks_visited), +1) this_week,
+             if(has(weeks_visited, this_week) = 1, 'retained', 'gone') as status,
+             addWeeks(this_week, -1) as previous_week
+      FROM simulator_20241020.feed_actions
+      group by user_id)
+   where status = 'gone'
+   group by this_week,
+            previous_week,
+            status
+   HAVING this_week != addWeeks(toMonday(today()), +1)
+   union  all SELECT this_week,
+                     previous_week,
+                     toInt64(uniq (user_id)) as num_users,
+                     status
+   FROM
+     (SELECT user_id,
+             groupUniqArray(toMonday(toDate(time))) as weeks_visited,
+             arrayJoin(weeks_visited) as this_week,
+             if(has(weeks_visited, addWeeks(this_week, -1)) = 1, 'retained', 'new') as status,
+             addWeeks(this_week, -1) as previous_week
+      FROM simulator_20241020.feed_actions
+      group by user_id)
+   group by this_week,
+            previous_week,
+            status) AS virtual_table
+GROUP BY status,
+         toStartOfDay(toDateTime(this_week))
+ORDER BY "SUM(num_users)" DESC
+LIMIT 1000;
+
+-- Retention Heat map
+SELECT date AS date,
+       start_date AS start_date,
+       sum(active_users) AS "sum(active_users)"
+FROM
+  (SELECT start_date, date, count(user_id) as active_users
+   FROM
+     (SELECT *
+      FROM
+        (SELECT user_id,
+                min(toDate(time)) as start_date
+         FROM simulator_20241020.feed_actions
+         GROUP by user_id) as t1
+      JOIN
+        (SELECT DISTINCT user_id,
+                         toDate(time) as date
+         FROM simulator_20241020.feed_actions) as t2 ON t1.user_id=t2.user_id
+      WHERE start_date >= today()-10)
+   GROUP by start_date,date) AS virtual_table
+GROUP BY date, start_date
+LIMIT 1000;
+
+-- Retention Heat map
+  
+SELECT day AS day,
+              start_day AS start_day,
+              max("MAX(users)") AS "MAX(MAX(users))"
+FROM
+  (SELECT day AS day,
+                 start_day AS start_day,
+                 max(users) AS "MAX(users)"
+   FROM
+     (SELECT toString(start_day) AS start_day,
+             toString(day) AS day,
+             count(user_id) AS users
+      FROM
+        (SELECT *
+         FROM
+           (SELECT user_id,
+                   min(toDate(time)) AS start_day
+            FROM simulator_20241020.feed_actions
+            WHERE toDate(time) < toDate('2024-11-01')
+            GROUP BY user_id
+            HAVING start_day >= dateSub(toDate('2024-11-01'), INTERVAL 20 DAY)) AS t1
+         JOIN
+           (SELECT DISTINCT user_id,
+                            toDate(time) AS day
+            FROM simulator_20241020.feed_actions
+            WHERE toDate(time) < toDate('2024-11-01') ) AS t2 USING user_id
+         WHERE t2.day <= dateAdd(t1.start_day, INTERVAL 20 DAY) )
+      GROUP BY start_day,
+               day
+      limit 10000) AS virtual_table
+   GROUP BY day,
+            start_day
+   LIMIT 1000) AS virtual_table
+GROUP BY day,
+         start_day
+LIMIT 1000;
+
+-- Retention Cohort №%30 
+
+SELECT toStartOfDay(toDateTime(date)) AS __timestamp,
+       source AS source,
+                 sum(active_users) AS "SUM(active_users)"
+FROM
+  (SELECT toDate(start_date) as start_date, date, count(user_id) as active_users,
+                                                  source,
+                                                  os,
+                                                  country,
+                                                  city
+   FROM
+     (SELECT *
+      FROM
+        (SELECT user_id,
+                min(toDate(time)) as start_date,
+                source,
+                os,
+                country,
+                city
+         FROM simulator_20241020.feed_actions
+         GROUP by user_id,
+                  source,
+                  os,
+                  country,
+                  city) as t1
+      JOIN
+        (SELECT DISTINCT user_id,
+                         toDate(time) as date
+         FROM simulator_20241020.feed_actions) as t2 ON t1.user_id=t2.user_id
+      WHERE start_date >= toDate('2024-10-19') - 20)
+   GROUP by start_date,date,source,
+                            os,
+                            country,
+                            city) AS virtual_table
+WHERE start_date = '2024-09-29'
+GROUP BY source,
+         toStartOfDay(toDateTime(date))
+ORDER BY "SUM(active_users)" DESC
+LIMIT 1000;
+
+-- Active users by OS
+
+SELECT toStartOfDay(toDateTime(time)) AS __timestamp,
+       count(user_id) AS active_users
+FROM simulator_20241020.feed_actions
+WHERE time >= toDateTime('2024-10-10 00:00:00')
+  AND time < toDateTime('2024-10-20 00:00:00')
+GROUP BY toStartOfDay(toDateTime(time))
+ORDER BY active_users DESC
+LIMIT 50000;
+
+SELECT toStartOfDay(toDateTime(time)) AS __timestamp,
+       os AS os,
+       count(user_id) AS "COUNT(user_id)"
+FROM simulator_20241020.feed_actions
+WHERE time >= toDateTime('2024-10-10 00:00:00')
+  AND time < toDateTime('2024-10-20 00:00:00')
+GROUP BY os,
+         toStartOfDay(toDateTime(time))
+ORDER BY "COUNT(user_id)" DESC
+LIMIT 50000;
+
+
